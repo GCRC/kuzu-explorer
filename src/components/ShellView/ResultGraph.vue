@@ -642,56 +642,12 @@ export default {
 
       const container = this.$refs.graph;
       
-      // Create Sigma instance (non-reactive) 
+      // Create Sigma instance with default settings
       this._sigmaGraph = new Sigma(this._graphData, container, {
-        labelFont: "Lexend, Helvetica Neue, Helvetica, Arial, sans-serif",
-        labelSize: 12,
-        labelWeight: "500",
-        labelColor: "#ffffff",
-        // Disable default label rendering so we can draw custom labels
-        renderLabels: false,
         enableEdgeClickEvents: true,
         enableEdgeWheelEvents: true,
         enableEdgeHoverEvents: true,
-        allowInvalidContainer: true,
-        zIndex: true
-      });
-
-      // Add custom label rendering using the correct Sigma v3 API
-      this._sigmaGraph.on("afterRender", () => {
-        // Get the container canvas element
-        const container = this._sigmaGraph.getContainer();
-        const canvas = container.querySelector('canvas:last-child'); // Get the labels canvas
-        if (!canvas) return;
-        
-        const context = canvas.getContext('2d');
-        const camera = this._sigmaGraph.getCamera();
-        
-        this._graphData.forEachNode((nodeId, attributes) => {
-          if (!attributes.label || attributes.hidden) return;
-          
-          // Get node position and convert to screen coordinates
-          const nodePosition = this._graphData.getNodeAttributes(nodeId);
-          const screenPos = this._sigmaGraph.graphToViewport(nodePosition);
-          
-          // Calculate appropriate font size based on zoom level
-          const zoomLevel = camera.ratio;
-          const baseFontSize = 12;
-          const fontSize = Math.max(8, Math.min(24, baseFontSize / zoomLevel));
-          
-          // Configure text style
-          context.fillStyle = attributes.labelColor || "#ffffff";
-          context.font = `500 ${fontSize}px Lexend, Helvetica Neue, Arial, sans-serif`;
-          context.textAlign = "center";
-          context.textBaseline = "middle";
-          context.strokeStyle = "#000000";
-          context.lineWidth = Math.max(1, 2 / zoomLevel);
-          
-          // Add text stroke for better readability
-          context.strokeText(attributes.label, screenPos.x, screenPos.y);
-          // Draw the actual text
-          context.fillText(attributes.label, screenPos.x, screenPos.y);
-        });
+        allowInvalidContainer: true
       });
 
       // Set up event handlers

@@ -45,7 +45,7 @@ export const useSettingsStore = defineStore("settings", {
               fill: "#ffffff",
             },
           },
-          size: 75,
+          size: 30,
           style: {
             lineWidth: 3,
             fill: "#FF0000",
