@@ -25,9 +25,8 @@
     </div>
     
     <HoverContainer
-      v-if="g6Graph"
+      v-if="graphCreated"
       ref="hoverContainer"
-      :g6-graph="g6Graph"
       :schema="schema"
     />
     
@@ -234,8 +233,12 @@
 </template>
 
 <script lang="js">
-import G6 from '@antv/g6';
-import G6Utils from "../../utils/G6Utils";
+import Sigma from 'sigma';
+import Graph from 'graphology';
+import forceAtlas2 from 'graphology-layout-forceatlas2';
+import { circular } from 'graphology-layout';
+import { random } from 'graphology-layout';
+import SigmaUtils from "../../utils/SigmaUtils";
 import {
   DATA_TYPES, UI_SIZE, LOOP_POSITIONS, ARC_CURVE_OFFSETS
 } from "../../utils/Constants";
@@ -386,6 +389,15 @@ export default {
     },
   },
   mounted() {
+    // Initialize non-reactive Sigma.js properties
+    this._sigmaGraph = null;
+    this._graphData = null;
+    this._layoutRunning = false;
+    this._hoveredNode = null;
+    this._hoveredEdge = null;
+    this._clickedNode = null;
+    this._clickedEdge = null;
+    
     this.computeGraphWidth();
     window.addEventListener("resize", this.handleResize);
     window.addEventListener("mousemove", this.handleResizeMove);
@@ -397,8 +409,8 @@ export default {
     }
   },
   beforeUnmount() {
-    if (this.g6Graph) {
-      this.g6Graph.destroy();
+    if (this._sigmaGraph) {
+      this._sigmaGraph.kill();
     }
     window.removeEventListener("resize", this.handleResize);
     window.removeEventListener("mousemove", this.handleResizeMove);
@@ -420,136 +432,84 @@ export default {
       };
       return config;
     },
-    drawGraph() {
-      this.isGraphLoading = true; // Show loading overlay
-      if (this.graphCreated && this.g6Graph) {
-        this.g6Graph.destroy();
-      }
-      if (!this.queryResult) {
-        return;
-      }
-      const { counters, nodes, edges, } = this.extractGraphFromQueryResult(this.queryResult);
-      this.counters = counters;
-      if (nodes.length === 0) {
-        this.$emit("graphEmpty");
-      }
-      console.log("Nodes data sent to G6:", nodes);
-      console.log("Edges data sent to G6:", edges);
-      const container = this.$refs.graph;
-      const width = container.offsetWidth;
-      const height = container.offsetHeight;
+    
+    applyLayout() {
+      if (!this._graphData) return;
+      
+      // Start with random positions if nodes don't have positions
+      random.assign(this._graphData);
+      
+      // Apply ForceAtlas2 layout
+      const settings = forceAtlas2.inferSettings(this._graphData);
+      settings.adjustSizes = false;
+      settings.barnesHutOptimize = this._graphData.order > 100;
+      settings.strongGravityMode = true;
+      settings.gravity = 0.05;
+      settings.scalingRatio = 10;
+      settings.slowDown = 1;
+      
+      // Run layout for a fixed number of iterations
+      this._layoutRunning = true;
+      forceAtlas2.assign(this._graphData, { iterations: 300, settings });
+      this._layoutRunning = false;
+    },
 
-      this.g6Graph = new G6.Graph({
-        container,
-        width,
-        height,
-        linkCenter: false,
-        groupByTypes: false,
-        layout: this.getLayoutConfig(edges),
-        defaultNode: {
-          shape: "circle",
-          labelCfg: {
-            style: {
-              fontSize: 14,
-              fontFamily: "Lexend, Helvetica Neue, Helvetica, Arial, sans-serif",
-              fontWeight: 300,
-              fill: "#ffffff",
-            },
-          },
-          size: 100,
-          style: {
-            lineWidth: 0,
-            fill: "#FF0000",
-          },
-        },
-        nodeStateStyles: {
-          hover: {
-            lineWidth: 4,
-            stroke: '#1890FF',
-          },
-          click: {
-            lineWidth: 4,
-            stroke: '#1848FF',
-          },
-        },
-        defaultEdge: {
-          size: 5,
-          opacity: 1,
-          style: {
-            stroke: "#e2e2e2",
-            endArrow: true,
-            // TODO: investigate why the endArrow causes rendering issues
-            // endArrow: {
-            //   path: G6.Arrow.triangle(),
-            //   fill: "#e2e2e2",
-            // }
-          },
-          labelCfg: {
-            style: {
-              fontSize: 12,
-              fontFamily: "Lexend,Helvetica Neue, Helvetica, Arial, sans-serif",
-              fontWeight: 350,
-              background: {
-                fill: "#ffffff",
-                padding: [2, 2, 2, 2],
-                radius: 2,
-              },
-            },
-            refY: -14,
-            autoRotate: true,
-          },
+    setupEventHandlers() {
+      if (!this._sigmaGraph) return;
 
-        },
-        edgeStateStyles: {
-          hover: {
-            stroke: '#1890FF',
-            // endArrow: {
-            //   path: G6.Arrow.triangle(),
-            //   fill: "#1890FF",
-            // },
-          },
-          click: {
-            stroke: '#1848FF',
-            // endArrow: {
-            //   path: G6.Arrow.triangle(),
-            //   fill: "#1848FF",
-            // },
-          },
-        },
-        modes: {
-          default: ['drag-canvas', 'zoom-canvas', 'drag-node']
-        },
-      });
-
-      this.g6Graph.data({ nodes, edges, });
-
-      this.g6Graph.on('node:mouseenter', (e) => {
-        const nodeItem = e.item;
-        this.g6Graph.setItemState(nodeItem, 'hover', true);
-        this.$refs.hoverContainer.handleHover(nodeItem.getModel(), e);
-      });
-
-      this.g6Graph.on('node:mouseleave', (e) => {
-        const nodeItem = e.item;
-        this.g6Graph.setItemState(nodeItem, 'hover', false);
-        this.$refs.hoverContainer.resetHover();
-      });
-
-      this.g6Graph.on('node:mousemove', (e) => {
-        if (this.$refs.hoverContainer.currentHoveredModel) {
-          this.$refs.hoverContainer.updateTooltipPosition(e);
+      // Node hover events
+      this._sigmaGraph.on('enterNode', (event) => {
+        const node = event.node;
+        const nodeData = this._graphData.getNodeAttributes(node);
+        this._hoveredNode = node;
+        
+        // Update node appearance for hover
+        this._graphData.setNodeAttribute(node, 'color', '#1890FF');
+        this._graphData.setNodeAttribute(node, 'borderColor', '#1890FF');
+        this._graphData.setNodeAttribute(node, 'borderSize', 4);
+        
+        // Show hover tooltip
+        if (this.$refs.hoverContainer) {
+          const mockEvent = {
+            clientX: event.event.clientX,
+            clientY: event.event.clientY
+          };
+          this.$refs.hoverContainer.handleHover(nodeData, mockEvent);
         }
       });
 
-      this.g6Graph.on('node:click', (e) => {
-        const nodeItem = e.item;
-        const nodeModel = nodeItem.getModel();
+      this._sigmaGraph.on('leaveNode', (event) => {
+        const node = event.node;
+        const nodeData = this._graphData.getNodeAttributes(node);
+        this._hoveredNode = null;
+        
+        // Reset node appearance to original color
+        this._graphData.setNodeAttribute(node, 'color', nodeData.originalColor);
+        this._graphData.setNodeAttribute(node, 'borderColor', undefined);
+        this._graphData.setNodeAttribute(node, 'borderSize', 0);
+        
+        // Hide hover tooltip
+        if (this.$refs.hoverContainer) {
+          this.$refs.hoverContainer.resetHover();
+        }
+      });
+
+      // Node click events
+      this._sigmaGraph.on('clickNode', (event) => {
+        const node = event.node;
+        const nodeData = this._graphData.getNodeAttributes(node);
+        
         this.deselectAll();
-        this.g6Graph.setItemState(nodeItem, 'click', true);
-        this.handleClick(nodeModel);
+        this._clickedNode = node;
+        
+        // Update node appearance for selection
+        this._graphData.setNodeAttribute(node, 'borderColor', '#1848FF');
+        this._graphData.setNodeAttribute(node, 'borderSize', 4);
+        
+        this.handleClick(nodeData);
+        
         if (!this.isSidePanelOpen) {
-          // Add a small delay to avoid conflicting with double click
-          window.setTimeout(() => {
+          setTimeout(() => {
             this.isSidePanelOpen = true;
             this.$nextTick(() => {
               this.handleResize();
@@ -558,119 +518,226 @@ export default {
         }
       });
 
-      this.g6Graph.on('node:dblclick', (e) => {
-        const nodeItem = e.item;
-        const nodeModel = nodeItem.getModel();
-        this.expandOnNode(nodeModel);
+      // Node double click events
+      this._sigmaGraph.on('doubleClickNode', (event) => {
+        const node = event.node;
+        const nodeData = this._graphData.getNodeAttributes(node);
+        this.expandOnNode(nodeData);
       });
 
-      // Auto layout after drag
-      this.g6Graph.on('node:dragstart', (e) => {
-        this.refreshDraggedNodePosition(e);
-      });
-
-      this.g6Graph.on('node:drag', (e) => {
-        this.refreshDraggedNodePosition(e);
-      });
-
-      this.g6Graph.on('node:dragend', (e) => {
-        this.refreshDraggedNodePosition(e);
-        this.g6Graph.layout();
-      });
-
-      this.g6Graph.on('edge:mouseenter', (e) => {
-        const edgeItem = e.item;
-        this.g6Graph.setItemState(edgeItem, 'hover', true);
-        this.$refs.hoverContainer.handleHover(edgeItem.getModel(), e);
-      });
-
-      this.g6Graph.on('edge:mouseleave', (e) => {
-        const edgeItem = e.item;
-        this.g6Graph.setItemState(edgeItem, 'hover', false);
-        this.$refs.hoverContainer.resetHover();
-      });
-
-      this.g6Graph.on('edge:mousemove', (e) => {
-        if (this.$refs.hoverContainer.currentHoveredModel) {
-          this.$refs.hoverContainer.updateTooltipPosition(e);
+      // Edge hover events
+      this._sigmaGraph.on('enterEdge', (event) => {
+        const edge = event.edge;
+        const edgeData = this._graphData.getEdgeAttributes(edge);
+        this._hoveredEdge = edge;
+        
+        // Update edge appearance for hover
+        this._graphData.setEdgeAttribute(edge, 'color', '#1890FF');
+        this._graphData.setEdgeAttribute(edge, 'size', (edgeData.size || 5) * 1.5);
+        
+        // Show hover tooltip
+        if (this.$refs.hoverContainer) {
+          const mockEvent = {
+            clientX: event.event.clientX,
+            clientY: event.event.clientY
+          };
+          this.$refs.hoverContainer.handleHover(edgeData, mockEvent);
         }
       });
 
-      this.g6Graph.on('edge:click', (e) => {
-        const edgeItem = e.item;
-        const edgeModel = edgeItem.getModel();
+      this._sigmaGraph.on('leaveEdge', (event) => {
+        const edge = event.edge;
+        const edgeData = this._graphData.getEdgeAttributes(edge);
+        this._hoveredEdge = null;
+        
+        // Reset edge appearance to original values
+        this._graphData.setEdgeAttribute(edge, 'color', edgeData.originalColor);
+        this._graphData.setEdgeAttribute(edge, 'size', edgeData.originalSize);
+        
+        // Hide hover tooltip
+        if (this.$refs.hoverContainer) {
+          this.$refs.hoverContainer.resetHover();
+        }
+      });
+
+      // Edge click events
+      this._sigmaGraph.on('clickEdge', (event) => {
+        const edge = event.edge;
+        const edgeData = this._graphData.getEdgeAttributes(edge);
+        
         this.deselectAll();
         this.unhighlightEverything();
-        this.g6Graph.setItemState(edgeItem, 'click', true);
-        this.handleClick(edgeModel);
+        this._clickedEdge = edge;
+        
+        // Update edge appearance for selection
+        this._graphData.setEdgeAttribute(edge, 'color', '#1848FF');
+        this._graphData.setEdgeAttribute(edge, 'size', (edgeData.size || 5) * 1.5);
+        
+        this.handleClick(edgeData);
+        
         if (!this.isSidePanelOpen) {
           this.toggleSidePanel();
         }
       });
 
-      this.g6Graph.on('canvas:click', () => {
+      // Canvas click events
+      this._sigmaGraph.on('clickStage', () => {
         this.deselectAll();
         this.unhighlightEverything();
       });
+    },
 
-      this.g6Graph.render();
+    drawGraph() {
+      this.isGraphLoading = true; // Show loading overlay
+      if (this.graphCreated && this._sigmaGraph) {
+        this._sigmaGraph.kill();
+      }
+      if (!this.queryResult) {
+        return;
+      }
+      const { counters, nodes, edges } = this.extractGraphFromQueryResult(this.queryResult);
+      this.counters = counters;
+      if (nodes.length === 0) {
+        this.$emit("graphEmpty");
+        return;
+      }
+      console.log("Nodes data sent to Sigma:", nodes);
+      console.log("Edges data sent to Sigma:", edges);
+
+      // Create new graphology instance (non-reactive)
+      this._graphData = new Graph();
+
+      // Add nodes to graphology
+      nodes.forEach(node => {
+        this._graphData.addNode(node.id, {
+          x: Math.random() * 1000, // Will be overridden by layout
+          y: Math.random() * 1000,
+          size: node.size || 100,
+          color: node.color || "#FF0000",
+          originalColor: node.color || "#FF0000", // Store original color for reset
+          label: node.label || "",
+          properties: node.properties,
+          originalNode: node
+        });
+      });
+
+      // Add edges to graphology
+      edges.forEach(edge => {
+        // Check if both source and target nodes exist
+        if (this._graphData.hasNode(edge.source) && this._graphData.hasNode(edge.target)) {
+          this._graphData.addEdge(edge.source, edge.target, {
+            size: edge.size || 5,
+            color: edge.color || "#e2e2e2",
+            originalColor: edge.color || "#e2e2e2", // Store original color for reset
+            originalSize: edge.size || 5, // Store original size for reset
+            label: edge.label || "",
+            properties: edge.properties,
+            originalEdge: edge
+          });
+        }
+      });
+
+      // Apply ForceAtlas2 layout
+      this.applyLayout();
+
+      const container = this.$refs.graph;
+      
+      // Create Sigma instance (non-reactive) 
+      this._sigmaGraph = new Sigma(this._graphData, container, {
+        labelFont: "Lexend, Helvetica Neue, Helvetica, Arial, sans-serif",
+        labelSize: 12,
+        labelWeight: "500",
+        labelColor: "#ffffff",
+        // Disable default label rendering so we can draw custom labels
+        renderLabels: false,
+        enableEdgeClickEvents: true,
+        enableEdgeWheelEvents: true,
+        enableEdgeHoverEvents: true,
+        allowInvalidContainer: true,
+        zIndex: true
+      });
+
+      // Add custom label rendering using the correct Sigma v3 API
+      this._sigmaGraph.on("afterRender", () => {
+        // Get the container canvas element
+        const container = this._sigmaGraph.getContainer();
+        const canvas = container.querySelector('canvas:last-child'); // Get the labels canvas
+        if (!canvas) return;
+        
+        const context = canvas.getContext('2d');
+        const camera = this._sigmaGraph.getCamera();
+        
+        this._graphData.forEachNode((nodeId, attributes) => {
+          if (!attributes.label || attributes.hidden) return;
+          
+          // Get node position and convert to screen coordinates
+          const nodePosition = this._graphData.getNodeAttributes(nodeId);
+          const screenPos = this._sigmaGraph.graphToViewport(nodePosition);
+          
+          // Calculate appropriate font size based on zoom level
+          const zoomLevel = camera.ratio;
+          const baseFontSize = 12;
+          const fontSize = Math.max(8, Math.min(24, baseFontSize / zoomLevel));
+          
+          // Configure text style
+          context.fillStyle = attributes.labelColor || "#ffffff";
+          context.font = `500 ${fontSize}px Lexend, Helvetica Neue, Arial, sans-serif`;
+          context.textAlign = "center";
+          context.textBaseline = "middle";
+          context.strokeStyle = "#000000";
+          context.lineWidth = Math.max(1, 2 / zoomLevel);
+          
+          // Add text stroke for better readability
+          context.strokeText(attributes.label, screenPos.x, screenPos.y);
+          // Draw the actual text
+          context.fillText(attributes.label, screenPos.x, screenPos.y);
+        });
+      });
+
+      // Set up event handlers
+      this.setupEventHandlers();
+
       this.graphCreated = true;
 
       // Fit the graph to view after rendering
-      this.g6Graph.once('afterrender', () => {
+      this.$nextTick(() => {
         this.fitToView();
         this.isGraphLoading = false; // Hide loading overlay after fit to view
       });
-
-      this.g6Graph.on('node:mouseenter', (e) => {
-        const nodeItem = e.item;
-        this.g6Graph.setItemState(nodeItem, 'hover', true);
-        this.$refs.hoverContainer.handleHover(nodeItem.getModel(), e);
-      });
     },
 
-    refreshDraggedNodePosition(e) {
-      const model = e.item.get('model');
-      model.fx = e.x;
-      model.fy = e.y;
-      model.x = e.x;
-      model.y = e.y;
+    refreshDraggedNodePosition(node, x, y) {
+      if (!this._graphData || !this._graphData.hasNode(node)) return;
+      this._graphData.setNodeAttribute(node, 'x', x);
+      this._graphData.setNodeAttribute(node, 'y', y);
     },
 
     hideNode() {
-      if (!this.g6Graph) {
+      if (!this._sigmaGraph || !this._graphData) {
         console.error('Graph not initialized');
         return;
       }
 
-      const currentSelectedNode = this.g6Graph.findAllByState('node', 'click')[0];
-      if (!currentSelectedNode) {
+      if (!this._clickedNode) {
         console.error('No node selected');
         return;
       }
 
       try {
-        const nodeId = currentSelectedNode.getModel().id;
+        const nodeId = this._clickedNode;
         this.numHiddenNodes += 1;
-        currentSelectedNode.hide();
+        
+        // Hide node by setting its size to 0 or removing it temporarily
+        this._graphData.setNodeAttribute(nodeId, 'hidden', true);
+        this._graphData.setNodeAttribute(nodeId, 'size', 0);
         this.deselectAll();
 
-        const relatedEdges = this.g6Graph.getEdges().filter((edge) => {
-          try {
-            const edgeModel = edge.getModel();
-            return edgeModel.source === nodeId || edgeModel.target === nodeId;
-          } catch (e) {
-            console.error('Error processing edge:', e);
-            return false;
-          }
-        });
-
-        relatedEdges.forEach((edge) => {
-          try {
+        // Hide related edges
+        this._graphData.forEachEdge((edge, attributes, source, target) => {
+          if (source === nodeId || target === nodeId) {
             this.numHiddenRels += 1;
-            edge.hide();
-          } catch (e) {
-            console.error('Error hiding edge:', e);
+            this._graphData.setEdgeAttribute(edge, 'hidden', true);
+            this._graphData.setEdgeAttribute(edge, 'size', 0);
           }
         });
       } catch (e) {
@@ -680,9 +747,9 @@ export default {
 
     enableHighlightMode() {
       this.isHighlightedMode = true;
-      const currentSelectedNode = this.g6Graph.findAllByState('node', 'click')[0];
-      if (currentSelectedNode) {
-        this.highlightNode(currentSelectedNode.getModel());
+      if (this._clickedNode) {
+        const nodeData = this._graphData.getNodeAttributes(this._clickedNode);
+        this.highlightNode(nodeData);
       }
     },
 
@@ -692,16 +759,24 @@ export default {
     },
 
     showAllNodesRels() {
-      this.g6Graph.getNodes().forEach((node) => {
-        if (!node.isVisible()) {
-          node.show();
+      if (!this._graphData) return;
+      
+      // Show all hidden nodes
+      this._graphData.forEachNode((node, attributes) => {
+        if (attributes.hidden) {
+          this._graphData.setNodeAttribute(node, 'hidden', false);
+          this._graphData.setNodeAttribute(node, 'size', attributes.originalSettings?.size || 100);
         }
       });
-      this.g6Graph.getEdges().forEach((edge) => {
-        if (!edge.isVisible()) {
-          edge.show();
+      
+      // Show all hidden edges
+      this._graphData.forEachEdge((edge, attributes) => {
+        if (attributes.hidden) {
+          this._graphData.setEdgeAttribute(edge, 'hidden', false);
+          this._graphData.setEdgeAttribute(edge, 'size', attributes.originalSettings?.size || 5);
         }
       });
+      
       this.numHiddenNodes = 0;
       this.numHiddenRels = 0;
     },
@@ -710,7 +785,7 @@ export default {
       return `${id.table}_${id.offset}`;
     },
 
-    extractGraphFromQueryResult(queryResult, linkDistance = 200) {
+    extractGraphFromQueryResult(queryResult) {
       const rows = queryResult.rows;
       const dataTypes = queryResult.dataTypes;
       const nodes = {};
@@ -743,129 +818,129 @@ export default {
         return currentMap[sortedNodeInfo[3]];
       }
 
-      function getReadableTextColor(bgColor) {
-        // Remove hash if present
-        const color = bgColor.charAt(0) === '#' ? bgColor.substring(1) : bgColor;
-        const r = parseInt(color.substring(0, 2), 16);
-        const g = parseInt(color.substring(2, 4), 16);
-        const b = parseInt(color.substring(4, 6), 16);
-        // Calculate luminance
-        const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-        return luminance > 0.6 ? '#000000' : '#ffffff';
-      }
-
       const processNode = (rawNode) => {
         const nodeId = this.encodeId(rawNode._id);
         nodeLabels[rawNode._id.table] = rawNode._label;
         const nodeSettings = this.settingsStore.settingsForLabel(rawNode._label);
-        const nodeFill = nodeSettings.g6Settings.style.fill;
-        const labelColor = getReadableTextColor(nodeFill);
-        const g6Node = {
+        
+        // Get color directly from the store's colorForLabel function
+        const nodeFill = this.settingsStore.colorForLabel(rawNode._label);
+        
+        // Extract other settings from g6Settings
+        const g6Settings = nodeSettings?.g6Settings || {};
+        const nodeSize = g6Settings.size || 100;
+        const labelConfig = g6Settings.labelCfg || {};
+        const labelStyle = labelConfig.style || {};
+        
+        const sigmaNode = {
           id: nodeId,
           properties: rawNode,
-          ...nodeSettings.g6Settings,
-          labelCfg: {
-            ...nodeSettings.g6Settings.labelCfg,
-            style: {
-              ...nodeSettings.g6Settings.labelCfg.style,
-              fill: labelColor,
-              lineWidth: 1,
-            }
-          }
+          size: nodeSize,
+          color: nodeFill,
+          borderColor: SigmaUtils.shadeColor(nodeFill),
+          borderSize: 0,
+          labelFont: labelStyle.fontFamily || "Lexend, Helvetica Neue, Helvetica, Arial, sans-serif",
+          labelSize: labelStyle.fontSize || 14,
+          labelWeight: labelStyle.fontWeight || "300",
+          labelColor: SigmaUtils.getReadableTextColor(nodeFill),
+          // Store original settings for reference
+          originalSettings: g6Settings
         }
+        
         if (nodes[nodeId]) {
           return;
         }
+        
         const expectedPropertiesType = {};
         const expectedProperties = this.schema.nodeTables.find((table) => table.name === rawNode._label).properties;
         expectedProperties.forEach((property) => {
           expectedPropertiesType[property.name] = property.type;
         });
+        
         const nodeLabelProp = nodeSettings.label;
         if (!nodeLabelProp) {
-          g6Node.label = "";
+          sigmaNode.label = "";
         } else {
-          g6Node.label = rawNode[nodeLabelProp];
+          sigmaNode.label = rawNode[nodeLabelProp];
           if (nodeLabelProp in expectedPropertiesType) {
-            g6Node.label = ValueFormatter.beautifyValue(rawNode[nodeLabelProp], expectedPropertiesType[nodeLabelProp]);
+            sigmaNode.label = ValueFormatter.beautifyValue(rawNode[nodeLabelProp], expectedPropertiesType[nodeLabelProp]);
           }
-          g6Node.label = String(g6Node.label);
-          const nodeSize = nodeSettings.g6Settings.size;
-          const fontSize = nodeSettings.g6Settings.labelCfg.style.fontSize;
-          g6Node.label = G6Utils.fittingString(g6Node.label, nodeSize - 6, fontSize);
+          sigmaNode.label = String(sigmaNode.label);
+          const fontSize = labelStyle.fontSize || 14;
+          // Truncate node label to fit within node
+          sigmaNode.label = SigmaUtils.fittingString(sigmaNode.label, nodeSize - 6, fontSize);
         }
-        g6Node.style.stroke = G6Utils.shadeColor(g6Node.style.fill);
-        nodes[nodeId] = g6Node;
+        
+        nodes[nodeId] = sigmaNode;
       };
 
       const processRel = (rawRel) => {
         const relSettings = this.settingsStore.settingsForLabel(rawRel._label);
         const relId = this.encodeId(rawRel._id);
         const numberOfOverlappingRels = increaseRelCounter(rawRel._src, rawRel._dst);
-        const g6Rel = {
+        
+        // Get color directly from the store's colorForLabel function
+        const edgeColor = this.settingsStore.colorForLabel(rawRel._label);
+        
+        // Extract other settings from g6Settings
+        const g6Settings = relSettings?.g6Settings || {};
+        const edgeSize = g6Settings.size || 5;
+        const labelConfig = g6Settings.labelCfg || {};
+        const labelStyle = labelConfig.style || {};
+        
+        const sigmaEdge = {
           id: relId,
           properties: rawRel,
           source: this.encodeId(rawRel._src),
           target: this.encodeId(rawRel._dst),
-          ...relSettings.g6Settings,
-          labelCfg: {
-            ...relSettings.g6Settings.labelCfg,
-            style: {
-              background: { 
-                  fill: "#ffffff",
-                  padding: [2, 2, 2, 2],
-                  radius: 2,
-                 },
-                fontSize: 12,
-                fontFamily: "Lexend, Helvetica Neue, Helvetica, Arial, sans-serif",
-                fontWeight: 300,
-                fill: "#000000",
-                
-            }
-          },
-          style: {
-            ...relSettings.g6Settings.style,
-            endArrow: true,
-            startArrow: false,
-          },
+          size: edgeSize,
+          color: edgeColor,
+          labelFont: labelStyle.fontFamily || "Lexend, Helvetica Neue, Helvetica, Arial, sans-serif",
+          labelSize: labelStyle.fontSize || 12,
+          labelWeight: labelStyle.fontWeight || "300",
+          labelColor: "#000000",
+          // Store curve info for multiple edges between same nodes
+          curveOffset: numberOfOverlappingRels > 1 ? 
+            ARC_CURVE_OFFSETS[(numberOfOverlappingRels - 1) % ARC_CURVE_OFFSETS.length] : 0,
+          isLoop: false,
+          // Store original settings for reference
+          originalSettings: g6Settings
         }
-        if (g6Rel.source === g6Rel.target) {
-          g6Rel.type = "loop";
-          g6Rel.loopCfg = {
-            dist: 50,
-            position: LOOP_POSITIONS[(numberOfOverlappingRels - 1) % LOOP_POSITIONS.length],
-          };
-        } else if (numberOfOverlappingRels > 1) {
-          g6Rel.type = 'quadratic';
-          g6Rel.curveOffset = ARC_CURVE_OFFSETS[(numberOfOverlappingRels - 1) % ARC_CURVE_OFFSETS.length];
+        
+        // Handle self-loops
+        if (sigmaEdge.source === sigmaEdge.target) {
+          sigmaEdge.isLoop = true;
+          sigmaEdge.loopPosition = LOOP_POSITIONS[(numberOfOverlappingRels - 1) % LOOP_POSITIONS.length];
         }
 
         const expectedPropertiesType = {};
         const relTable = this.schema.relTables.find((table) => table.name === rawRel._label);
-        const expectedProperties = this.schema.relTables.find((table) => table.name === rawRel._label).properties;
+        const expectedProperties = relTable.properties;
         expectedProperties.forEach((property) => {
           expectedPropertiesType[property.name] = property.type;
         });
+        
         const relLabelProp = relSettings.label;
         if (!relLabelProp) {
-          g6Rel.label = "";
+          sigmaEdge.label = "";
         } else {
-          g6Rel.label = rawRel[relLabelProp];
+          sigmaEdge.label = rawRel[relLabelProp];
           if (relLabelProp === '_label' && relTable.group) {
-            g6Rel.label = relTable.group;
+            sigmaEdge.label = relTable.group;
           }
           if (relLabelProp in expectedPropertiesType) {
-            g6Rel.label = ValueFormatter.beautifyValue(rawRel[relLabelProp], expectedPropertiesType[relLabelProp]);
+            sigmaEdge.label = ValueFormatter.beautifyValue(rawRel[relLabelProp], expectedPropertiesType[relLabelProp]);
           }
-          g6Rel.label = String(g6Rel.label);
-          const fontSize = relSettings.g6Settings.labelCfg.style.fontSize;
+          sigmaEdge.label = String(sigmaEdge.label);
+          const fontSize = labelStyle.fontSize || 12;
           // Truncate edge label to max width 80px
-          g6Rel.label = G6Utils.fittingString(g6Rel.label, 80, fontSize);
+          sigmaEdge.label = SigmaUtils.fittingString(sigmaEdge.label, 80, fontSize);
         }
+        
         if (edges[relId]) {
           return;
         }
-        edges[relId] = g6Rel;
+        edges[relId] = sigmaEdge;
       }
       // Deduplicate nodes and edges
       rows.forEach((row) => {
@@ -976,10 +1051,9 @@ export default {
 
     handleResize() {
       this.$nextTick(() => {
-        if (this.g6Graph) {
-          const width = this.$refs.graph.offsetWidth;
-          this.g6Graph.changeSize(width, parseInt(this.containerHeight));
-          this.g6Graph.fitCenter();
+        if (this._sigmaGraph) {
+          // Sigma automatically handles canvas resizing
+          this._sigmaGraph.refresh();
         }
       });
     },
@@ -1005,59 +1079,74 @@ export default {
     },
 
     highlightNode(model) {
-      if (!this.isHighlightedMode) {
+      if (!this.isHighlightedMode || !this._graphData) {
         return;
       }
       if (model.properties._src || model.properties._dst) {
         return;
       }
-      const srcDstSet = new Set();
-      this.g6Graph.getEdges().forEach((edge) => {
-        const sourceNode = edge.getModel().source;
-        const targetNode = edge.getModel().target;
-        if (!edge.getModel().labelBackup) {
-          edge.getModel().labelBackup = edge.getModel().label;
+      
+      const nodeId = model.id || model.properties._id && this.encodeId(model.properties._id);
+      if (!nodeId) return;
+      
+      const connectedNodes = new Set();
+      
+      // First, dim all edges and find connected nodes
+      this._graphData.forEachEdge((edge, attributes, source, target) => {
+        if (!attributes.originalLabel) {
+          this._graphData.setEdgeAttribute(edge, 'originalLabel', attributes.label);
         }
-        if (sourceNode !== model.id && targetNode !== model.id) {
-          this.g6Graph.setItemState(edge, 'opaque', true);
-          this.g6Graph.setItemState(edge, 'click', false);
-          edge.getModel().label = "";
-          this.g6Graph.refreshItem(edge);
+        
+        if (source !== nodeId && target !== nodeId) {
+          // Dim unconnected edges
+          this._graphData.setEdgeAttribute(edge, 'color', '#cccccc');
+          this._graphData.setEdgeAttribute(edge, 'size', (attributes.size || 5) * 0.3);
+          this._graphData.setEdgeAttribute(edge, 'label', '');
         } else {
-          this.g6Graph.setItemState(edge, 'opaque', false);
-          this.g6Graph.setItemState(edge, 'click', true);
-          srcDstSet.add(sourceNode);
-          srcDstSet.add(targetNode);
-          if (edge.getModel().labelBackup) {
-            edge.getModel().label = edge.getModel().labelBackup;
-            delete edge.getModel().labelBackup;
-            this.g6Graph.refreshItem(edge);
+          // Keep connected edges visible
+          this._graphData.setEdgeAttribute(edge, 'color', attributes.originalSettings?.style?.stroke || '#1890FF');
+          this._graphData.setEdgeAttribute(edge, 'size', (attributes.size || 5) * 1.2);
+          connectedNodes.add(source);
+          connectedNodes.add(target);
+          
+          if (attributes.originalLabel) {
+            this._graphData.setEdgeAttribute(edge, 'label', attributes.originalLabel);
           }
         }
       });
-      this.g6Graph.getNodes().forEach((node) => {
-        if (node.getModel().id !== model.id && !srcDstSet.has(node.getModel().id)) {
-          this.g6Graph.setItemState(node, 'opaque', true);
+      
+      // Dim unconnected nodes
+      this._graphData.forEachNode((node, attributes) => {
+        if (node !== nodeId && !connectedNodes.has(node)) {
+          this._graphData.setNodeAttribute(node, 'color', '#cccccc');
+          this._graphData.setNodeAttribute(node, 'size', (attributes.size || 100) * 0.5);
         } else {
-          this.g6Graph.setItemState(node, 'opaque', false);
+          // Keep connected nodes visible
+          this._graphData.setNodeAttribute(node, 'color', attributes.originalSettings?.style?.fill || attributes.color);
+          this._graphData.setNodeAttribute(node, 'size', attributes.originalSettings?.size || attributes.size || 100);
         }
       });
     },
 
     unhighlightEverything() {
-      if (!this.isHighlightedMode) {
+      if (!this.isHighlightedMode || !this._graphData) {
         return;
       }
-      this.g6Graph.getNodes().forEach((node) => {
-        this.g6Graph.setItemState(node, 'opaque', false);
+      
+      // Restore all nodes to original appearance
+      this._graphData.forEachNode((node, attributes) => {
+        this._graphData.setNodeAttribute(node, 'color', attributes.originalSettings?.style?.fill || attributes.color);
+        this._graphData.setNodeAttribute(node, 'size', attributes.originalSettings?.size || 100);
       });
-      this.g6Graph.getEdges().forEach((edge) => {
-        this.g6Graph.setItemState(edge, 'opaque', false);
-        this.g6Graph.setItemState(edge, 'click', false);
-        if (edge.getModel().labelBackup) {
-          edge.getModel().label = edge.getModel().labelBackup;
-          delete edge.getModel().labelBackup;
-          this.g6Graph.refreshItem(edge);
+      
+      // Restore all edges to original appearance
+      this._graphData.forEachEdge((edge, attributes) => {
+        this._graphData.setEdgeAttribute(edge, 'color', attributes.originalSettings?.style?.stroke || "#e2e2e2");
+        this._graphData.setEdgeAttribute(edge, 'size', attributes.originalSettings?.size || 5);
+        
+        if (attributes.originalLabel) {
+          this._graphData.setEdgeAttribute(edge, 'label', attributes.originalLabel);
+          this._graphData.removeEdgeAttribute(edge, 'originalLabel');
         }
       });
     },
@@ -1106,11 +1195,11 @@ export default {
     },
 
     expandSelectedNode() {
-      const currentSelectedNode = this.g6Graph.findAllByState('node', 'click')[0];
-      if (!currentSelectedNode) {
+      if (!this._clickedNode || !this._graphData) {
         return;
       }
-      this.expandOnNode(currentSelectedNode.getModel());
+      const nodeData = this._graphData.getNodeAttributes(this._clickedNode);
+      this.expandOnNode(nodeData);
       this.deselectAll();
     },
 
@@ -1131,12 +1220,10 @@ export default {
     },
 
     collapseSelectedNode() {
-      const currentSelectedNode = this.g6Graph.findAllByState('node', 'click')[0];
-      if (!currentSelectedNode) {
+      if (!this._clickedNode) {
         return;
       }
-      const id = currentSelectedNode.getModel().id;
-      this.collapseNode(id);
+      this.collapseNode(this._clickedNode);
       this.handleSettingsChange();
       this.isCurrentNodeExpanded = false;
       this.deselectAll();
@@ -1148,50 +1235,69 @@ export default {
     },
 
     addData(nodes, edges) {
-      if (!this.g6Graph) {
+      if (!this._graphData) {
         return;
       }
-      const nodesToAdd = [];
-      for (let key in nodes) {
-        const node = nodes[key];
-        if (this.g6Graph.findById(node.id)) {
-          continue;
+      
+      // Add new nodes
+      nodes.forEach(node => {
+        if (!this._graphData.hasNode(node.id)) {
+          this._graphData.addNode(node.id, {
+            x: Math.random() * 1000,
+            y: Math.random() * 1000,
+            size: node.size || 100,
+            color: node.color || "#FF0000",
+            label: node.label || "",
+            properties: node.properties,
+            originalSettings: node.originalSettings
+          });
+          this.counters.node[node.properties._label] = (this.counters.node[node.properties._label] || 0) + 1;
+          this.counters.total.node += 1;
         }
-        nodesToAdd.push(node);
-        this.counters.node[node.properties._label] += 1;
-        this.counters.total.node += 1;
-      }
-      const edgesToAdd = [];
-      for (let key in edges) {
-        const edge = edges[key];
-        if (this.g6Graph.findById(edge.id)) {
-          continue;
+      });
+      
+      // Add new edges
+      edges.forEach(edge => {
+        if (!this._graphData.hasEdge(edge.id) && 
+            this._graphData.hasNode(edge.source) && 
+            this._graphData.hasNode(edge.target)) {
+          this._graphData.addEdge(edge.source, edge.target, {
+            size: edge.size || 5,
+            color: edge.color || "#e2e2e2",
+            label: edge.label || "",
+            properties: edge.properties,
+            originalSettings: edge.originalSettings
+          });
+          this.counters.rel[edge.properties._label] = (this.counters.rel[edge.properties._label] || 0) + 1;
+          this.counters.total.rel += 1;
         }
-        edgesToAdd.push(edge);
-        this.counters.rel[edge.properties._label] += 1;
-        this.counters.total.rel += 1;
-      }
-      const currentNodes = this.g6Graph.getNodes().map((node) => node.getModel());
-      const currentEdges = this.g6Graph.getEdges().map((edge) => edge.getModel());
-      const newData = {
-        nodes: currentNodes.concat(nodesToAdd),
-        edges: currentEdges.concat(edgesToAdd),
-      };
-      this.g6Graph.changeData(newData);
+      });
+      
+      // Apply layout to new nodes
+      this.applyLayout();
     },
 
     deselectAll() {
-      if (!this.g6Graph) {
+      if (!this._graphData) {
         return;
       }
-      const currentSelectedNode = this.g6Graph.findAllByState('node', 'click')[0];
-      if (currentSelectedNode) {
-        this.g6Graph.setItemState(currentSelectedNode, 'click', false);
+      
+      // Reset selected node appearance
+      if (this._clickedNode && this._graphData.hasNode(this._clickedNode)) {
+        const nodeData = this._graphData.getNodeAttributes(this._clickedNode);
+        this._graphData.setNodeAttribute(this._clickedNode, 'borderColor', nodeData.originalSettings?.style?.fill ? SigmaUtils.shadeColor(nodeData.originalSettings.style.fill) : undefined);
+        this._graphData.setNodeAttribute(this._clickedNode, 'borderSize', 0);
       }
-      const currentSelectedEdge = this.g6Graph.findAllByState('edge', 'click')[0];
-      if (currentSelectedEdge) {
-        this.g6Graph.setItemState(currentSelectedEdge, 'click', false);
+      
+      // Reset selected edge appearance
+      if (this._clickedEdge && this._graphData.hasEdge(this._clickedEdge)) {
+        const edgeData = this._graphData.getEdgeAttributes(this._clickedEdge);
+        this._graphData.setEdgeAttribute(this._clickedEdge, 'color', edgeData.originalSettings?.style?.stroke || "#e2e2e2");
+        this._graphData.setEdgeAttribute(this._clickedEdge, 'size', edgeData.originalSettings?.size || 5);
       }
+      
+      this._clickedNode = null;
+      this._clickedEdge = null;
       this.clickedLabel = "";
       this.clickedProperties = [];
       this.clickedIsNode = false;
@@ -1218,7 +1324,7 @@ export default {
         clearTimeout(this.toolbarDebounceTimer);
       }
       this.toolbarDebounceTimer = setTimeout(() => {
-        G6Utils.zoomIn(this.g6Graph);
+        SigmaUtils.zoomIn(this._sigmaGraph);
       }, this.toolbarDebounceTimeout);
     },
 
@@ -1227,7 +1333,7 @@ export default {
         clearTimeout(this.toolbarDebounceTimer);
       }
       this.toolbarDebounceTimer = setTimeout(() => {
-        G6Utils.zoomOut(this.g6Graph);
+        SigmaUtils.zoomOut(this._sigmaGraph);
       }, this.toolbarDebounceTimeout);
     },
 
@@ -1236,7 +1342,7 @@ export default {
         clearTimeout(this.toolbarDebounceTimer);
       }
       this.toolbarDebounceTimer = setTimeout(() => {
-        G6Utils.fitToView(this.g6Graph);
+        SigmaUtils.fitToView(this._sigmaGraph);
       }, this.toolbarDebounceTimeout);
     },
 
@@ -1245,18 +1351,13 @@ export default {
         clearTimeout(this.toolbarDebounceTimer);
       }
       this.toolbarDebounceTimer = setTimeout(() => {
-        G6Utils.actualSize(this.g6Graph);
+        SigmaUtils.actualSize(this._sigmaGraph);
       }, this.toolbarDebounceTimeout);
     },
 
     handleSettingsChange() {
-      const { nodes, edges, counters } = this.extractGraphFromQueryResult(this.queryResult);
-      if (!this.g6Graph) {
-        return;
-      }
-      this.g6Graph.changeData({ nodes, edges });
-      this.counters = counters;
-      this.expansions.forEach(e => this.addDataWithQueryResult(e.neighbors));
+      // Redraw the entire graph with new settings
+      this.drawGraph();
     },
 
     startResize(e) {

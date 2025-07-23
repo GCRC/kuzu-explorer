@@ -43,10 +43,6 @@ import ValueFormatter from "../../utils/ValueFormatter";
 
 export default {
     props: {
-        g6Graph: {
-            type: Object,
-            required: true
-        },
         schema: {
             type: Object,
             required: true
@@ -94,10 +90,9 @@ export default {
         },
 
         showTooltip(model, event) {
-            const mousePos = this.g6Graph.getPointByClient(event.clientX, event.clientY);
-            const point = this.g6Graph.getCanvasByPoint(mousePos.x, mousePos.y);
-            this.tooltipX = point.x + 50;
-            this.tooltipY = point.y + 20;
+            // Use mouse coordinates directly since Sigma.js handles canvas positioning
+            this.tooltipX = event.clientX + 50;
+            this.tooltipY = event.clientY + 20;
             this.tooltipVisible = true;
         },
 
@@ -108,10 +103,9 @@ export default {
         },
 
         updateTooltipPosition(event) {
-            const mousePos = this.g6Graph.getPointByClient(event.clientX, event.clientY);
-            const point = this.g6Graph.getCanvasByPoint(mousePos.x, mousePos.y);
-            this.tooltipX = point.x + 10;
-            this.tooltipY = point.y + 20;
+            // Use mouse coordinates directly since Sigma.js handles canvas positioning
+            this.tooltipX = event.clientX + 10;
+            this.tooltipY = event.clientY + 20;
         },
 
         isNeighborExpanded(model) {
